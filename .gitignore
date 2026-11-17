@@ -1,0 +1,17 @@
+# Entorno virtual
+.venv/
+
+# Secretos y configuración local
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Datos generados (base vectorial, logs de auditoría)
+chroma_db/
+logs/
+
+# Editor / sistema
+.vscode/
+Thumbs.db
