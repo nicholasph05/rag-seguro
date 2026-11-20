@@ -1,16 +1,18 @@
 """Consulta RAG: pregunta -> fragmentos más cercanos -> respuesta del LLM con citas.
 
-Uso (desde la raíz del repo): python -m rag.consulta "¿Cuántos días de vacaciones tengo?"
+Uso (desde la raíz del repo): python -m rag.consulta --usuario ana "¿Cuántos días de vacaciones tengo?"
 """
 import argparse
+import sys
 from dataclasses import dataclass
 
 import chromadb
 from chromadb.config import Settings
 
-from rag.config import COLECCION, DIR_CHROMA, TOP_K, UMBRAL_SIMILITUD
+from rag.config import COLECCION, DIR_CHROMA, MARGEN_RELATIVO, TOP_K, UMBRAL_SIMILITUD
 from rag.embeddings import vectorizar
 from rag.llm import generar
+from rag.permisos import AccesoDenegado, roles_documento_permitidos
 
 SIN_RESPUESTA = "No encuentro esa información en los documentos disponibles."
 
@@ -19,8 +21,9 @@ Reglas:
 1. Responde en español usando SOLO la información del contexto.
 2. Responde TODAS las partes de la pregunta.
 3. Termina cada frase con su fuente entre corchetes, por ejemplo [1].
-4. No comentes qué información falta ni agregues datos que no estén en el contexto.
-5. Si el contexto no contiene la respuesta, responde exactamente: "{SIN_RESPUESTA}"
+4. Responde SOLO lo que se pregunta. Ignora los fragmentos que no sirvan para responder.
+5. No comentes qué información falta ni agregues datos que no estén en el contexto.
+6. Si el contexto no contiene la respuesta, responde exactamente: "{SIN_RESPUESTA}"
 """
 
 
@@ -38,10 +41,16 @@ def _coleccion():
     return cliente.get_collection(COLECCION)
 
 
-def recuperar(pregunta: str, k: int = TOP_K, umbral: float = UMBRAL_SIMILITUD) -> list[Resultado]:
+def recuperar(
+    pregunta: str, roles_permitidos: list[str], k: int = TOP_K, umbral: float = UMBRAL_SIMILITUD
+) -> list[Resultado]:
+    """roles_permitidos es obligatorio: no existe una búsqueda sin filtro de permisos."""
+    if not roles_permitidos:
+        raise AccesoDenegado("Sin roles permitidos")
     res = _coleccion().query(
         query_embeddings=vectorizar([pregunta]),
         n_results=k,
+        where={"rol": {"$in": roles_permitidos}},  # filtro dentro de la búsqueda, no después
         include=["documents", "metadatas", "distances"],
     )
     resultados = [
@@ -54,7 +63,11 @@ def recuperar(pregunta: str, k: int = TOP_K, umbral: float = UMBRAL_SIMILITUD) -
         )
         for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
     ]
-    return [r for r in resultados if r.similitud >= umbral]
+    resultados = [r for r in resultados if r.similitud >= umbral]
+    if resultados:  # quita contexto de relleno: muy por debajo del mejor fragmento
+        mejor = resultados[0].similitud
+        resultados = [r for r in resultados if r.similitud >= mejor - MARGEN_RELATIVO]
+    return resultados
 
 
 def construir_contexto(resultados: list[Resultado]) -> str:
@@ -63,8 +76,8 @@ def construir_contexto(resultados: list[Resultado]) -> str:
     )
 
 
-def responder(pregunta: str, k: int = TOP_K) -> tuple[str, list[Resultado]]:
-    resultados = recuperar(pregunta, k)
+def responder(pregunta: str, usuario: str, k: int = TOP_K) -> tuple[str, list[Resultado]]:
+    resultados = recuperar(pregunta, roles_documento_permitidos(usuario), k)
     if not resultados:  # nada relevante: no se llama al LLM, así no puede inventar
         return SIN_RESPUESTA, []
     usuario = (
@@ -78,11 +91,16 @@ def responder(pregunta: str, k: int = TOP_K) -> tuple[str, list[Resultado]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pregunta al asistente RAG")
     parser.add_argument("pregunta")
+    parser.add_argument("-u", "--usuario", required=True, help="usuario que pregunta (data/usuarios.json)")
     parser.add_argument("-k", type=int, default=TOP_K, help="fragmentos a recuperar")
     parser.add_argument("--ver-contexto", action="store_true", help="muestra los fragmentos enviados al LLM")
     args = parser.parse_args()
 
-    respuesta, resultados = responder(args.pregunta, args.k)
+    try:
+        respuesta, resultados = responder(args.pregunta, args.usuario, args.k)
+    except AccesoDenegado as error:
+        print(f"Acceso denegado: {error}")
+        sys.exit(1)
     if args.ver_contexto and resultados:
         print(f"\n--- Contexto enviado al LLM ---\n{construir_contexto(resultados)}\n-------------------------------")
     print(f"\n{respuesta}\n\nFuentes recuperadas:")
