@@ -13,6 +13,7 @@ SOLAPE_ORACIONES = 1        # oraciones repetidas entre fragmentos consecutivos
 
 # Recuperación y generación
 TOP_K = 4  # fragmentos que se envían al LLM
+UMBRAL_SIMILITUD = 0.40  # por debajo, el fragmento se descarta como ruido
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODELO = os.getenv("LLM_MODELO", "llama3.2:3b")
 LLM_TEMPERATURA = 0.1  # baja: respuestas fieles al contexto

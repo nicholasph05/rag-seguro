@@ -8,17 +8,20 @@ from dataclasses import dataclass
 import chromadb
 from chromadb.config import Settings
 
-from rag.config import COLECCION, DIR_CHROMA, TOP_K
+from rag.config import COLECCION, DIR_CHROMA, TOP_K, UMBRAL_SIMILITUD
 from rag.embeddings import vectorizar
 from rag.llm import generar
 
-SISTEMA = (
-    "Eres el asistente interno de Nébula Logística S.A.S. "
-    "Responde en español, de forma breve, usando SOLO la información del contexto. "
-    "Después de cada afirmación indica la fuente entre corchetes, por ejemplo [1]. "
-    "Si el contexto no contiene la respuesta, di exactamente: "
-    "\"No encuentro esa información en los documentos disponibles.\""
-)
+SIN_RESPUESTA = "No encuentro esa información en los documentos disponibles."
+
+SISTEMA = f"""Eres el asistente interno de Nébula Logística S.A.S.
+Reglas:
+1. Responde en español usando SOLO la información del contexto.
+2. Responde TODAS las partes de la pregunta.
+3. Termina cada frase con su fuente entre corchetes, por ejemplo [1].
+4. No comentes qué información falta ni agregues datos que no estén en el contexto.
+5. Si el contexto no contiene la respuesta, responde exactamente: "{SIN_RESPUESTA}"
+"""
 
 
 @dataclass
@@ -35,13 +38,13 @@ def _coleccion():
     return cliente.get_collection(COLECCION)
 
 
-def recuperar(pregunta: str, k: int = TOP_K) -> list[Resultado]:
+def recuperar(pregunta: str, k: int = TOP_K, umbral: float = UMBRAL_SIMILITUD) -> list[Resultado]:
     res = _coleccion().query(
         query_embeddings=vectorizar([pregunta]),
         n_results=k,
         include=["documents", "metadatas", "distances"],
     )
-    return [
+    resultados = [
         Resultado(
             texto=doc,
             fuente=meta["fuente"],
@@ -51,6 +54,7 @@ def recuperar(pregunta: str, k: int = TOP_K) -> list[Resultado]:
         )
         for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
     ]
+    return [r for r in resultados if r.similitud >= umbral]
 
 
 def construir_contexto(resultados: list[Resultado]) -> str:
@@ -61,7 +65,13 @@ def construir_contexto(resultados: list[Resultado]) -> str:
 
 def responder(pregunta: str, k: int = TOP_K) -> tuple[str, list[Resultado]]:
     resultados = recuperar(pregunta, k)
-    usuario = f"Contexto:\n{construir_contexto(resultados)}\n\nPregunta: {pregunta}"
+    if not resultados:  # nada relevante: no se llama al LLM, así no puede inventar
+        return SIN_RESPUESTA, []
+    usuario = (
+        f"Contexto:\n{construir_contexto(resultados)}\n\n"
+        f"Pregunta: {pregunta}\n\n"
+        "Responde todas las partes de la pregunta y cita cada frase con [n]."
+    )
     return generar(SISTEMA, usuario), resultados
 
 
@@ -69,12 +79,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pregunta al asistente RAG")
     parser.add_argument("pregunta")
     parser.add_argument("-k", type=int, default=TOP_K, help="fragmentos a recuperar")
+    parser.add_argument("--ver-contexto", action="store_true", help="muestra los fragmentos enviados al LLM")
     args = parser.parse_args()
 
     respuesta, resultados = responder(args.pregunta, args.k)
+    if args.ver_contexto and resultados:
+        print(f"\n--- Contexto enviado al LLM ---\n{construir_contexto(resultados)}\n-------------------------------")
     print(f"\n{respuesta}\n\nFuentes recuperadas:")
     for i, r in enumerate(resultados, start=1):
         print(f"  [{i}] {r.similitud:.3f}  [{r.rol}] {r.fuente}, pág. {r.pagina}")
+    if not resultados:
+        print(f"  (ningún fragmento supera el umbral de {UMBRAL_SIMILITUD})")
 
 
 if __name__ == "__main__":
